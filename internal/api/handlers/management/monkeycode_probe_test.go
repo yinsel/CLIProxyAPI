@@ -21,6 +21,7 @@ func TestMonkeyCodeDraftProbe(t *testing.T) {
 	for _, protocol := range []struct{ name, path, body string }{
 		{"openai", "/v1/chat/completions", `{"messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"hi"}],"stream":true}`},
 		{"codex", "/v1/responses", `{"instructions":"You are a helpful assistant.","input":[{"role":"user","content":"hi"}],"stream":true}`},
+		{"codex-history", "/v1/responses", `{"instructions":"You are a helpful assistant.","input":[{"role":"user","content":"hi"},{"type":"reasoning","content":null,"summary":[],"encrypted_content":"opaque"},{"role":"user","content":"continue"}],"stream":true}`},
 		{"claude", "/v1/messages", `{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}],"stream":true}`},
 	} {
 		t.Run(protocol.name, func(t *testing.T) {
@@ -48,7 +49,11 @@ func TestMonkeyCodeDraftProbe(t *testing.T) {
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls++
 						data, _ := io.ReadAll(r.Body)
-						if string(data) != protocol.body {
+						wantBody := protocol.body
+						if scenario.secret != "" && protocol.name == "codex-history" {
+							wantBody = strings.Replace(wantBody, `"content":null`, `"content":[]`, 1)
+						}
+						if string(data) != wantBody {
 							t.Error("probe body changed")
 						}
 						signature := r.Header.Get("X-OhMyAgent-Signature")

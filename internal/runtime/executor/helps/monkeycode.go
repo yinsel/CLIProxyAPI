@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const monkeyCodeSignatureHeader = "X-OhMyAgent-Signature"
@@ -92,6 +94,34 @@ func monkeyCodePromptText(raw json.RawMessage, firstOnly bool) string {
 	return strings.Join(texts, "\n")
 }
 
+// prepareMonkeyCodeBody normalizes only explicit null reasoning content in
+// Responses history. Preserve reasoning summaries, encrypted content, tool
+// calls, and omitted content; strict upstreams require an array when present.
+func prepareMonkeyCodeBody(path string, body []byte) ([]byte, error) {
+	if !strings.HasSuffix(path, "/responses") && !strings.HasSuffix(path, "/responses/compact") {
+		return body, nil
+	}
+	if !gjson.ValidBytes(body) {
+		return nil, monkeyCodeError("Invalid MonkeyCode Responses JSON")
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body, nil
+	}
+	for i, item := range input.Array() {
+		content := item.Get("content")
+		if item.Get("type").String() != "reasoning" || content.Type != gjson.Null || !content.Exists() {
+			continue
+		}
+		var errSet error
+		body, errSet = sjson.SetRawBytes(body, fmt.Sprintf("input.%d.content", i), []byte("[]"))
+		if errSet != nil {
+			return nil, fmt.Errorf("normalize MonkeyCode reasoning content: %w", errSet)
+		}
+	}
+	return body, nil
+}
+
 // ConfigureMonkeyCodeClient signs final requests only for explicitly configured credentials.
 func ConfigureMonkeyCodeClient(client *http.Client, auth *cliproxyauth.Auth) {
 	if auth == nil || auth.Attributes["signing_secret"] == "" {
@@ -133,11 +163,20 @@ func (t *monkeyCodeTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		if err != nil {
 			return nil, fmt.Errorf("read MonkeyCode request body: %w", err)
 		}
+		body, err = prepareMonkeyCodeBody(request.URL.Path, body)
+		if err != nil {
+			return nil, err
+		}
 		signature, err := MonkeyCodeSignature(body, t.secret)
 		if err != nil {
 			return nil, err
 		}
 		request.Body = io.NopCloser(bytes.NewReader(body))
+		request.ContentLength = int64(len(body))
+		request.Header.Del("Content-Length")
+		request.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		}
 		request.Header.Set(monkeyCodeSignatureHeader, signature)
 	}
 	if t.apiKey != "" {
