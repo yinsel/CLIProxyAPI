@@ -119,6 +119,9 @@ func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan erro
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.Attributes["signing_secret"] != "" {
+		return false
+	}
 	if auth == nil {
 		return false
 	}

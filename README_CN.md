@@ -2,6 +2,25 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
+## MonkeyCode 原生签名（本分支）
+
+独立启动本分支的 CPA 引擎后，打开 `/management.html` 并登录，点击右下角 **MonkeyCode**，
+选择已配置的 OpenAI、Codex 或 Claude 接入，在高级设置中填写与 API Key 配套的完整
+`signing_secret`（包含 `omas_` 前缀，不做 Base64 解码），点击保存。留空保存可关闭签名。
+这不是 WebUI 登录用的 `remote-management.secret-key`。无需运行 EasyCLIProxyAPI 桌面端。
+
+也可以直接在 `openai-compatibility`、`codex-api-key` 或 `claude-api-key` 的记录中添加
+`signing_secret`。字段名称与桌面端一致；OpenAI 多密钥记录共用一个签名密钥，若各 API Key
+配套的密钥不同，请拆分成多个接入记录。WebUI 更新后此配置入口仍然保留。
+
+签名在协议转换、伪装和请求体处理完成后生成，使用 HMAC-SHA256 和
+`X-OhMyAgent-Signature: v1=<hex>`。启用后移除发往上游 URL 的全部查询参数，Codex 使用
+HTTP/SSE；未设置签名的供应商保持原行为。请求应包含非空系统提示词，管理 API 测试请求同样如此。
+更改签名密钥后支持配置热更新，旧版 WebUI 保存其他字段时会保留未显式修改的签名密钥。
+
+迁移旧桌面端转发配置时，请填写真实上游 Base URL，不要复制 `/monkeycode/` 本地临时地址。
+
+
 如果您想在您的桌面使用 CLIProxyAPI，我们推荐您使用我们的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。
 
 CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。

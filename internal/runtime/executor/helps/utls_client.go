@@ -403,5 +403,6 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
+	ConfigureMonkeyCodeClient(client, auth)
 	return client
 }

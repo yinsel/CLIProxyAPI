@@ -457,6 +457,9 @@ type CloakConfig struct {
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
+	// SigningSecret enables MonkeyCode HMAC signing with the complete raw omas_ key.
+	SigningSecret string `yaml:"signing_secret,omitempty" json:"signing_secret,omitempty"`
+
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -572,6 +575,9 @@ func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
+	// SigningSecret enables MonkeyCode HMAC signing with the complete raw omas_ key.
+	SigningSecret string `yaml:"signing_secret,omitempty" json:"signing_secret,omitempty"`
+
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -770,6 +776,9 @@ func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
+	// SigningSecret enables MonkeyCode HMAC signing with the complete raw omas_ key.
+	SigningSecret string `yaml:"signing_secret,omitempty" json:"signing_secret,omitempty"`
+
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 

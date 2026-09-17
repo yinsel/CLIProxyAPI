@@ -28,6 +28,7 @@ import (
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
+	defer func() { ConfigureMonkeyCodeClient(httpClient, auth) }()
 	if timeout > 0 {
 		httpClient.Timeout = timeout
 	}

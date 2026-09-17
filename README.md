@@ -2,6 +2,26 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+## Native MonkeyCode signing (this branch)
+
+Run this CPA build independently, open `/management.html`, sign in, and click **MonkeyCode**
+at the bottom right. Choose an existing OpenAI, Codex, or Claude provider and save its complete
+`signing_secret`, including the `omas_` prefix, without Base64 decoding. Save an empty value
+to disable signing. This is separate from the WebUI management login key. No desktop bridge is required.
+
+The same `signing_secret` field is accepted in `openai-compatibility`, `codex-api-key`, and
+`claude-api-key` records. OpenAI key entries share the provider secret; use separate providers
+when keys require different secrets. The settings entry survives management panel updates.
+
+HMAC-SHA256 signing uses the final translated/cloaked prompt and the
+`X-OhMyAgent-Signature: v1=<hex>` header. Signed requests omit **all URL query parameters**;
+Codex uses HTTP/SSE instead of WebSockets. Unsigned providers retain existing behavior.
+Requests, including management API probes, need a non-empty system prompt. Secret changes
+hot-reload, and legacy panel provider saves preserve omitted secrets.
+When migrating desktop bridge configuration, use the real upstream Base URL, not a temporary
+localhost `/monkeycode/` address.
+
+
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.

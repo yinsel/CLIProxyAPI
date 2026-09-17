@@ -273,6 +273,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.ClaudeKey {
 			o := oldCfg.ClaudeKey[i]
 			n := newCfg.ClaudeKey[i]
+			if o.SigningSecret != n.SigningSecret {
+				changes = append(changes, fmt.Sprintf("claude[%d].signing_secret: updated", i))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(changes, fmt.Sprintf("claude[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
@@ -327,6 +330,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.CodexKey {
 			o := oldCfg.CodexKey[i]
 			n := newCfg.CodexKey[i]
+			if o.SigningSecret != n.SigningSecret {
+				changes = append(changes, fmt.Sprintf("codex[%d].signing_secret: updated", i))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(changes, fmt.Sprintf("codex[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}

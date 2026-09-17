@@ -592,12 +592,14 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	preserveMonkeyCodeSecrets(data, arr, h.cfg.ClaudeKey)
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
+		SigningSecret           *string                          `json:"signing_secret"`
 		APIKey                  *string                          `json:"api-key"`
 		FingerprintProfile      *string                          `json:"fingerprint-profile"`
 		Weight                  json.RawMessage                  `json:"weight"`
@@ -643,6 +645,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 
 	entry := h.cfg.ClaudeKey[targetIndex]
+	if body.Value.SigningSecret != nil {
+		entry.SigningSecret = *body.Value.SigningSecret
+	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
@@ -786,12 +791,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	preserveMonkeyCodeSecrets(data, filtered, h.cfg.OpenAICompatibility)
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
+		SigningSecret         *string                             `json:"signing_secret"`
 		Name                  *string                             `json:"name"`
 		Prefix                *string                             `json:"prefix"`
 		Disabled              *bool                               `json:"disabled"`
@@ -835,6 +842,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 
 	entry := h.cfg.OpenAICompatibility[targetIndex]
+	if body.Value.SigningSecret != nil {
+		entry.SigningSecret = *body.Value.SigningSecret
+	}
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
@@ -1414,12 +1424,14 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	preserveMonkeyCodeSecrets(data, filtered, h.cfg.CodexKey)
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
+		SigningSecret       *string                          `json:"signing_secret"`
 		APIKey              *string                          `json:"api-key"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
@@ -1464,6 +1476,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 
 	entry := h.cfg.CodexKey[targetIndex]
+	if body.Value.SigningSecret != nil {
+		entry.SigningSecret = *body.Value.SigningSecret
+	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
