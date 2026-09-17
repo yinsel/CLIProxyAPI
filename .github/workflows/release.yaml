@@ -8,15 +8,6 @@ on:
         required: true
         default: 'v7.3.5'
         type: string
-      source_ref:
-        description: 'Source branch or commit, used only when the tag does not exist'
-        required: true
-        default: 'feat/monkeycode-webui'
-        type: string
-  push:
-    # run only against tags
-    tags:
-      - '*'
 
 concurrency:
   group: release-${{ inputs.release_tag || github.ref_name }}
@@ -42,8 +33,6 @@ jobs:
           fetch-tags: true
       - name: Resolve release source
         id: source
-        env:
-          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
@@ -53,12 +42,8 @@ jobs:
           if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
             source_sha="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
           else
-            if ! source_sha="$(git rev-parse --verify --end-of-options "refs/remotes/origin/$SOURCE_REF^{commit}" 2>/dev/null)"; then
-              source_sha="$(git rev-parse --verify --end-of-options "$SOURCE_REF^{commit}")"
-            fi
-            git tag "$RELEASE_TAG" "$source_sha"
-            # GITHUB_TOKEN pushes do not trigger other workflows such as Docker publishing.
-            git push origin "refs/tags/$RELEASE_TAG"
+            echo "::error::Tag $RELEASE_TAG does not exist; select an existing release tag"
+            exit 1
           fi
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "Building $RELEASE_TAG from $source_sha"
