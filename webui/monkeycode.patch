@@ -1,0 +1,723 @@
+diff --git a/src/features/providers/adapters.ts b/src/features/providers/adapters.ts
+index 876753d..87fc8b5 100644
+--- a/src/features/providers/adapters.ts
++++ b/src/features/providers/adapters.ts
+@@ -67,7 +67,9 @@ function providerKeyToResource(
+   const disabled = hasDisableAllModelsRule(config.excludedModels);
+   const flags: ProviderResource['flags'] = {};
+   if (brand === 'codex' || brand === 'xai') {
+-    flags.websockets = (config as ProviderKeyConfig).websockets === true;
++    const provider = config as ProviderKeyConfig;
++    flags.websockets =
++      provider.websockets === true && !(brand === 'codex' && provider.signingSecret);
+   }
+   if (brand === 'claude') {
+     const claudeConfig = config as ProviderKeyConfig;
+diff --git a/src/features/providers/descriptors.ts b/src/features/providers/descriptors.ts
+index a9e3a34..ba4b13a 100644
+--- a/src/features/providers/descriptors.ts
++++ b/src/features/providers/descriptors.ts
+@@ -3,6 +3,7 @@ import type { ProviderBrand } from './types';
+ export interface ProviderDescriptor {
+   id: ProviderBrand;
+   supportsName: boolean;
++  supportsMonkeyCode?: boolean;
+   supportsApiKey: boolean;
+   supportsDisabled: boolean;
+   supportsBaseUrl: boolean;
+@@ -62,6 +63,7 @@ export const PROVIDER_DESCRIPTORS: Record<ProviderBrand, ProviderDescriptor> = {
+   },
+   codex: {
+     id: 'codex',
++    supportsMonkeyCode: true,
+     supportsName: false,
+     supportsApiKey: true,
+     supportsDisabled: true,
+@@ -100,6 +102,7 @@ export const PROVIDER_DESCRIPTORS: Record<ProviderBrand, ProviderDescriptor> = {
+   },
+   claude: {
+     id: 'claude',
++    supportsMonkeyCode: true,
+     supportsName: false,
+     supportsApiKey: true,
+     supportsDisabled: true,
+@@ -138,6 +141,7 @@ export const PROVIDER_DESCRIPTORS: Record<ProviderBrand, ProviderDescriptor> = {
+   },
+   openaiCompatibility: {
+     id: 'openaiCompatibility',
++    supportsMonkeyCode: true,
+     supportsName: true,
+     supportsApiKey: false,
+     supportsDisabled: true,
+diff --git a/src/features/providers/monkeycode.ts b/src/features/providers/monkeycode.ts
+new file mode 100644
+index 0000000..5b40f13
+--- /dev/null
++++ b/src/features/providers/monkeycode.ts
+@@ -0,0 +1,45 @@
++import type { ApiCallRequest } from '@/services/api/apiCall';
++import type { ProviderBrand } from './types';
++import { PROVIDER_DESCRIPTORS } from './descriptors';
++
++const SYSTEM_PROMPT = 'You are a helpful assistant.';
++
++export function monkeyCodeCredentialsValid(
++  secret: string | undefined,
++  baseUrl: string,
++  keys: string[]
++): boolean {
++  return (
++    !secret ||
++    (Boolean(secret.trim()) &&
++      Boolean(baseUrl.trim()) &&
++      keys.filter((key) => key.trim()).length === 1)
++  );
++}
++
++// Send the current draft secret separately from the upstream body. An explicit
++// empty value disables signing even when the saved credential has a secret.
++export function monkeyCodeProbe(
++  brand: ProviderBrand,
++  secret: string | undefined,
++  body: Record<string, unknown>
++): Pick<ApiCallRequest, 'signingSecret' | 'data'> {
++  if (!PROVIDER_DESCRIPTORS[brand].supportsMonkeyCode || secret === undefined)
++    return { data: JSON.stringify(body) };
++  const payload = { ...body };
++  if (secret) {
++    payload.stream = true;
++    if (brand === 'claude') {
++      payload.system = SYSTEM_PROMPT;
++    } else if (brand === 'codex') {
++      payload.instructions = SYSTEM_PROMPT;
++      payload.input = [{ role: 'user', content: 'hi' }];
++    } else {
++      payload.messages = [
++        { role: 'system', content: SYSTEM_PROMPT },
++        ...((body.messages as unknown[]) ?? []),
++      ];
++    }
++  }
++  return { signingSecret: secret ?? '', data: JSON.stringify(payload) };
++}
+diff --git a/src/features/providers/sheets/forms/BaseProviderForm.tsx b/src/features/providers/sheets/forms/BaseProviderForm.tsx
+index ad0c154..11c95af 100644
+--- a/src/features/providers/sheets/forms/BaseProviderForm.tsx
++++ b/src/features/providers/sheets/forms/BaseProviderForm.tsx
+@@ -78,6 +78,7 @@ function buildInitialForm(
+   if (mode === 'create' || !resource) {
+     return {
+       apiKey: '',
++      signingSecret: '',
+       name: '',
+       baseUrl: brand === 'xai' ? XAI_API_BASE_URL : '',
+       proxyUrl: '',
+@@ -114,6 +115,7 @@ function buildInitialForm(
+       apiKey: '',
+       name: cfg.name ?? '',
+       baseUrl: cfg.baseUrl ?? '',
++      signingSecret: cfg.signingSecret ?? '',
+       proxyUrl: '',
+       prefix: cfg.prefix ?? '',
+       disabled: cfg.disabled === true,
+@@ -158,6 +160,7 @@ function buildInitialForm(
+     apiKey: '',
+     name: '',
+     baseUrl: cfg.baseUrl ?? '',
++    signingSecret: cfg.signingSecret ?? '',
+     proxyUrl: cfg.proxyUrl ?? '',
+     prefix: cfg.prefix ?? '',
+     disabled,
+@@ -253,6 +256,7 @@ export function BaseProviderForm({
+       modelRequired: t('providersPage.connectivity.modelRequired'),
+       timeout: (seconds: number) => t('providersPage.connectivity.timeout', { seconds }),
+       requestFailed: t('providersPage.connectivity.requestFailed'),
++      monkeyCodeCredentialsRequired: t('providersPage.monkeycode.credentialsRequired'),
+     }),
+     [t]
+   );
+@@ -261,6 +265,7 @@ export function BaseProviderForm({
+     {
+       brand,
+       baseUrl: form.baseUrl,
++      signingSecret: descriptor.supportsMonkeyCode ? (form.signingSecret ?? '') : undefined,
+       testModel: form.testModel,
+       models: form.models,
+       formHeaders: form.headers,
+@@ -387,6 +392,17 @@ export function BaseProviderForm({
+   };
+
+   const validate = (): string | null => {
++    if (descriptor.supportsMonkeyCode && form.signingSecret) {
++      const keys =
++        brand === 'openaiCompatibility'
++          ? (form.apiKeyEntries ?? []).filter((entry) =>
++              (entry.apiKey || entry.existingApiKey || '').trim()
++            )
++          : [form.apiKey.trim() || fallbackApiKey].filter(Boolean);
++      if (!form.signingSecret.trim() || !form.baseUrl.trim() || keys.length !== 1) {
++        return t('providersPage.monkeycode.credentialsRequired');
++      }
++    }
+     if (descriptor.supportsName && !form.name.trim()) {
+       return t('providersPage.form.validation.nameRequired');
+     }
+@@ -724,8 +740,8 @@ export function BaseProviderForm({
+             <input
+               type="checkbox"
+               className={styles.checkboxBox}
+-              checked={form.websockets ?? false}
+-              disabled={mutating}
++              checked={!(brand === 'codex' && form.signingSecret) && (form.websockets ?? false)}
++              disabled={mutating || Boolean(brand === 'codex' && form.signingSecret)}
+               onChange={(e) => updateField('websockets', e.target.checked)}
+             />
+             <span className={styles.checkboxText}>
+@@ -805,6 +821,29 @@ export function BaseProviderForm({
+         </Collapsible>
+       ) : null}
+
++      {descriptor.supportsMonkeyCode ? (
++        <Collapsible label={t('providersPage.monkeycode.advanced')}>
++          <div className={styles.field}>
++            <label className={styles.label} htmlFor={`${fid}-signingSecret`}>
++              MonkeyCode 支持
++            </label>
++            <input
++              id={`${fid}-signingSecret`}
++              className={styles.input}
++              type="password"
++              autoComplete="new-password"
++              spellCheck={false}
++              maxLength={4096}
++              value={form.signingSecret ?? ''}
++              placeholder="omas_..."
++              disabled={mutating}
++              onChange={(event) => updateField('signingSecret', event.target.value)}
++            />
++            <span className={styles.labelHint}>{t('providersPage.monkeycode.hint')}</span>
++          </div>
++        </Collapsible>
++      ) : null}
++
+       {descriptor.supportsHeaders ? (
+         <Collapsible label={t('providersPage.form.headersSection')}>
+           <div className={styles.entriesList}>
+diff --git a/src/features/providers/sheets/forms/useConnectivityTest.ts b/src/features/providers/sheets/forms/useConnectivityTest.ts
+index 9ad5b9b..2d7bc2a 100644
+--- a/src/features/providers/sheets/forms/useConnectivityTest.ts
++++ b/src/features/providers/sheets/forms/useConnectivityTest.ts
+@@ -13,6 +13,8 @@ import { buildHeaderObject, hasHeader } from '@/utils/headers';
+ import { getErrorMessage } from '@/utils/helpers';
+ import type { ApiKeyEntryInput, ModelEntryInput, ProviderBrand } from '../../types';
+
++import { monkeyCodeProbe, monkeyCodeCredentialsValid } from '../../monkeycode';
++
+ const DEFAULT_TIMEOUT_MS = 30_000;
+ const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
+
+@@ -64,6 +66,7 @@ export interface UseConnectivityTestArgs {
+   apiKey?: string;
+   fallbackApiKey?: string;
+   authIndex?: string;
++  signingSecret?: string;
+ }
+
+ export interface ConnectivityErrorMessages {
+@@ -73,6 +76,7 @@ export interface ConnectivityErrorMessages {
+   modelRequired: string;
+   timeout: (seconds: number) => string;
+   requestFailed: string;
++  monkeyCodeCredentialsRequired?: string;
+ }
+
+ export interface UseConnectivityTestResult {
+@@ -102,6 +106,7 @@ export function useConnectivityTest(
+     apiKey,
+     fallbackApiKey,
+     authIndex,
++    signingSecret,
+   } = args;
+
+   const entriesCount = apiKeyEntries?.length ?? 0;
+@@ -156,11 +161,12 @@ export function useConnectivityTest(
+       (testModel ?? '').trim(),
+       apiKey ?? '',
+       fallbackApiKey ?? '',
++      signingSecret ?? '',
+       authIndex ?? '',
+       h,
+       m,
+     ].join('||');
+-  }, [apiKey, authIndex, baseUrl, fallbackApiKey, testModel, formHeaders, models]);
++  }, [apiKey, authIndex, baseUrl, fallbackApiKey, testModel, formHeaders, models, signingSecret]);
+
+   const lastSignatureRef = useRef(signature);
+   useEffect(() => {
+@@ -184,6 +190,19 @@ export function useConnectivityTest(
+     async (idx: number): Promise<boolean> => {
+       if (brand !== 'openaiCompatibility') return false;
+
++      if (
++        !monkeyCodeCredentialsValid(
++          signingSecret,
++          baseUrl,
++          (apiKeyEntries ?? []).map((entry) => entry.apiKey || entry.existingApiKey || '')
++        )
++      ) {
++        updateOpenaiStatus(idx, {
++          state: 'error',
++          message: messages.monkeyCodeCredentialsRequired ?? messages.apiKeyRequired,
++        });
++        return false;
++      }
+       const trimmedBase = baseUrl.trim();
+       if (!trimmedBase) {
+         updateOpenaiStatus(idx, {
+@@ -241,7 +260,7 @@ export function useConnectivityTest(
+             method: 'POST',
+             url: endpoint,
+             header: headerObj,
+-            data: JSON.stringify({
++            ...monkeyCodeProbe(brand, signingSecret, {
+               model,
+               messages: [{ role: 'user', content: 'Hi' }],
+               stream: false,
+@@ -275,6 +294,7 @@ export function useConnectivityTest(
+       models,
+       testModel,
+       updateOpenaiStatus,
++      signingSecret,
+     ]
+   );
+
+@@ -287,6 +307,13 @@ export function useConnectivityTest(
+
+   const runCodex = useCallback(async (): Promise<void> => {
+     if (brand !== 'codex' && brand !== 'xai') return;
++    if (!monkeyCodeCredentialsValid(signingSecret, baseUrl, [apiKey || fallbackApiKey || ''])) {
++      setCodexStatus({
++        state: 'error',
++        message: messages.monkeyCodeCredentialsRequired ?? messages.apiKeyRequired,
++      });
++      return;
++    }
+
+     const trimmedBase = baseUrl.trim();
+     if (!trimmedBase) {
+@@ -339,7 +366,7 @@ export function useConnectivityTest(
+           method: 'POST',
+           url: endpoint,
+           header: headerObj,
+-          data: JSON.stringify({
++          ...monkeyCodeProbe(brand, signingSecret, {
+             model,
+             input: 'Hi',
+             stream: false,
+@@ -359,7 +386,18 @@ export function useConnectivityTest(
+     } finally {
+       setInFlight((n) => n - 1);
+     }
+-  }, [apiKey, authIndex, baseUrl, brand, fallbackApiKey, formHeaders, messages, models, testModel]);
++  }, [
++    apiKey,
++    authIndex,
++    baseUrl,
++    brand,
++    fallbackApiKey,
++    formHeaders,
++    messages,
++    models,
++    testModel,
++    signingSecret,
++  ]);
+
+   const runGemini = useCallback(async (): Promise<void> => {
+     if (brand !== 'gemini' && brand !== 'interactions') return;
+@@ -442,6 +480,13 @@ export function useConnectivityTest(
+
+   const runClaude = useCallback(async (): Promise<void> => {
+     if (brand !== 'claude') return;
++    if (!monkeyCodeCredentialsValid(signingSecret, baseUrl, [apiKey || fallbackApiKey || ''])) {
++      setClaudeStatus({
++        state: 'error',
++        message: messages.monkeyCodeCredentialsRequired ?? messages.apiKeyRequired,
++      });
++      return;
++    }
+
+     const endpoint = buildClaudeMessagesEndpoint(baseUrl ?? '');
+     if (!endpoint) {
+@@ -489,7 +534,7 @@ export function useConnectivityTest(
+           method: 'POST',
+           url: endpoint,
+           header: headerObj,
+-          data: JSON.stringify({
++          ...monkeyCodeProbe(brand, signingSecret, {
+             model,
+             max_tokens: 8,
+             messages: [{ role: 'user', content: 'Hi' }],
+@@ -509,7 +554,18 @@ export function useConnectivityTest(
+     } finally {
+       setInFlight((n) => n - 1);
+     }
+-  }, [apiKey, authIndex, baseUrl, brand, fallbackApiKey, formHeaders, messages, models, testModel]);
++  }, [
++    apiKey,
++    authIndex,
++    baseUrl,
++    brand,
++    fallbackApiKey,
++    formHeaders,
++    messages,
++    models,
++    testModel,
++    signingSecret,
++  ]);
+
+   return {
+     openaiStatuses,
+diff --git a/src/features/providers/types.ts b/src/features/providers/types.ts
+index 4fcec9b..23f954e 100644
+--- a/src/features/providers/types.ts
++++ b/src/features/providers/types.ts
+@@ -172,6 +172,7 @@ export interface CloakInput {
+ }
+
+ export interface ProviderEntryFormInput {
++  signingSecret?: string;
+   /** OpenAI 创建时只在 apiKeyEntries 中传 */
+   apiKey: string;
+   /** OpenAI 必填,其余 brand 不展示 */
+diff --git a/src/features/providers/useProviderWorkbench.ts b/src/features/providers/useProviderWorkbench.ts
+index 3a3579a..5a43003 100644
+--- a/src/features/providers/useProviderWorkbench.ts
++++ b/src/features/providers/useProviderWorkbench.ts
+@@ -178,8 +178,9 @@ const buildProviderKeyConfig = (
+     authIndex: existing?.authIndex,
+   };
+   if ((brand === 'codex' || brand === 'xai') && input.websockets !== undefined) {
+-    next.websockets = input.websockets;
++    next.websockets = brand === 'codex' && input.signingSecret ? false : input.websockets;
+   }
++  if (brand === 'codex' || brand === 'claude') next.signingSecret = input.signingSecret ?? '';
+   if (brand === 'claude' && input.cloak) {
+     next.cloak = {
+       mode: input.cloak.mode.trim() || undefined,
+@@ -217,6 +218,7 @@ const buildOpenAIConfig = (
+   return {
+     ...(existing ?? {}),
+     name: input.name.trim(),
++    signingSecret: input.signingSecret ?? '',
+     baseUrl: input.baseUrl.trim(),
+     prefix: input.prefix.trim() || undefined,
+     apiKeyEntries,
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index cf4c01a..1860e97 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -1815,6 +1815,11 @@
+     },
+     "modelCatalog": {
+       "notLoaded": "Not loaded"
++    },
++    "monkeycode": {
++      "advanced": "Advanced settings",
++      "hint": "Optional: enter the complete paired omas_... secret, including the prefix, without Base64 decoding. Leave blank to disable. Saving and model tests use the current value. Signing removes all URL query parameters and disables Codex WebSocket in favor of HTTP/SSE.",
++      "credentialsRequired": "MonkeyCode signing requires an explicit Base URL, exactly one API key and its paired signing_secret."
+     }
+   }
+ }
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 74284d6..e53484a 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -1809,6 +1809,11 @@
+     },
+     "modelCatalog": {
+       "notLoaded": "Не загружено"
++    },
++    "monkeycode": {
++      "advanced": "Дополнительные настройки",
++      "hint": "Необязательно: полный секрет omas_... с префиксом, без декодирования Base64. Пустое поле отключает подпись. Сохранение и тест модели используют текущее значение. Подпись удаляет все параметры URL и отключает Codex WebSocket, используя HTTP/SSE.",
++      "credentialsRequired": "Для подписи MonkeyCode нужны Base URL, ровно один API Key и соответствующий signing_secret."
+     }
+   }
+ }
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index bec457c..22df3a6 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -1813,6 +1813,11 @@
+     },
+     "modelCatalog": {
+       "notLoaded": "未加载"
++    },
++    "monkeycode": {
++      "advanced": "高级设置",
++      "hint": "可选：填入与 API Key 配套的完整 omas_...（包含前缀，不做 Base64 解码）；留空关闭。保存和模型测试均使用当前值。启用后移除所有 URL 查询参数，Codex WebSocket 将关闭，使用 HTTP/SSE。",
++      "credentialsRequired": "启用 MonkeyCode 签名需要明确的 Base URL、一个 API Key 及其配套的 signing_secret。"
+     }
+   }
+ }
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 2277e00..6add5c4 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -1839,6 +1839,11 @@
+     },
+     "modelCatalog": {
+       "notLoaded": "未載入"
++    },
++    "monkeycode": {
++      "advanced": "進階設定",
++      "hint": "選填：輸入與 API Key 配對的完整 omas_...（包含前綴，不做 Base64 解碼）；留空關閉。儲存及模型測試均使用目前的值。啟用後移除所有 URL 查詢參數，停用 Codex WebSocket，使用 HTTP/SSE。",
++      "credentialsRequired": "啟用 MonkeyCode 簽章需要明確的 Base URL、一個 API Key 及配對的 signing_secret。"
+     }
+   }
+ }
+diff --git a/src/services/api/apiCall.ts b/src/services/api/apiCall.ts
+index 116bd9c..e4e502c 100644
+--- a/src/services/api/apiCall.ts
++++ b/src/services/api/apiCall.ts
+@@ -8,6 +8,7 @@ import { isRecord } from '@/utils/helpers';
+
+ export interface ApiCallRequest {
+   authIndex?: string;
++  signingSecret?: string;
+   method: string;
+   url: string;
+   header?: Record<string, string>;
+@@ -77,7 +78,15 @@ export const getApiCallErrorMessage = (result: ApiCallResult): string => {
+
+ export const apiCallApi = {
+   request: async (payload: ApiCallRequest, config?: AxiosRequestConfig): Promise<ApiCallResult> => {
+-    const response = await apiClient.post<Record<string, unknown>>('/api-call', payload, config);
++    const { signingSecret, ...request } = payload;
++    const response = await apiClient.post<Record<string, unknown>>(
++      '/api-call',
++      {
++        ...request,
++        ...(signingSecret === undefined ? {} : { signing_secret: signingSecret }),
++      },
++      config
++    );
+     const statusCode = Number(response?.status_code ?? 0);
+     const header = (response?.header ?? {}) as Record<string, string[]>;
+     const { bodyText, body } = normalizeBody(response?.body);
+diff --git a/src/services/api/providers.ts b/src/services/api/providers.ts
+index 60f74cf..1ebd252 100644
+--- a/src/services/api/providers.ts
++++ b/src/services/api/providers.ts
+@@ -33,9 +33,10 @@ const PROVIDER_COMMON_KEY_FIELDS = [
+
+ const GEMINI_KEY_FIELDS = PROVIDER_COMMON_KEY_FIELDS;
+ const INTERACTIONS_KEY_FIELDS = PROVIDER_COMMON_KEY_FIELDS;
+-const CODEX_KEY_FIELDS = [...PROVIDER_COMMON_KEY_FIELDS, 'websockets'] as const;
++const CODEX_KEY_FIELDS = [...PROVIDER_COMMON_KEY_FIELDS, 'websockets', 'signing_secret'] as const;
+ const XAI_KEY_FIELDS = CODEX_KEY_FIELDS;
+ const CLAUDE_KEY_FIELDS = [
++  'signing_secret',
+   ...PROVIDER_COMMON_KEY_FIELDS,
+   'cloak',
+   'fingerprint-profile',
+@@ -55,6 +56,7 @@ const VERTEX_KEY_FIELDS = [
+ ] as const;
+
+ const OPENAI_PROVIDER_FIELDS = [
++  'signing_secret',
+   'name',
+   'priority',
+   'disabled',
+@@ -324,6 +326,7 @@ const serializeApiKeyEntry = (entry: ApiKeyEntry) => {
+
+ const serializeProviderKey = (config: ProviderKeyConfig) => {
+   const payload: Record<string, unknown> = { 'api-key': config.apiKey };
++  if (config.signingSecret !== undefined) payload.signing_secret = config.signingSecret;
+   if (config.priority !== undefined) payload.priority = config.priority;
+   if (config.weight !== undefined) payload.weight = config.weight;
+   if (config.prefix?.trim()) payload.prefix = config.prefix.trim();
+@@ -419,6 +422,7 @@ const serializeOpenAIProvider = (provider: OpenAIProviderConfig) => {
+       ? provider.apiKeyEntries.map((entry) => serializeApiKeyEntry(entry))
+       : [],
+   };
++  if (provider.signingSecret !== undefined) payload.signing_secret = provider.signingSecret;
+   if (provider.prefix?.trim()) payload.prefix = provider.prefix.trim();
+   if (provider.disabled !== undefined) payload.disabled = provider.disabled;
+   const headers = serializeHeaders(provider.headers);
+diff --git a/src/services/api/transformers.ts b/src/services/api/transformers.ts
+index 83de722..0317fd0 100644
+--- a/src/services/api/transformers.ts
++++ b/src/services/api/transformers.ts
+@@ -130,6 +130,7 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null =>
+   if (!trimmed) return null;
+
+   const config: ProviderKeyConfig = { apiKey: trimmed };
++  if (typeof record?.signing_secret === 'string') config.signingSecret = record.signing_secret;
+   const weight = readCredentialWeight(record?.weight);
+   if (weight !== undefined) config.weight = weight;
+   const priority = record?.priority;
+@@ -254,6 +255,7 @@ const normalizeOpenAIProvider = (
+     apiKeyEntries,
+   };
+
++  if (typeof provider.signing_secret === 'string') result.signingSecret = provider.signing_secret;
+   const disabled = normalizeBoolean(provider.disabled);
+   if (disabled !== undefined) result.disabled = disabled;
+   const disableCooling = normalizeBoolean(provider['disable-cooling']);
+diff --git a/src/types/provider.ts b/src/types/provider.ts
+index c7db1c8..b7f86fb 100644
+--- a/src/types/provider.ts
++++ b/src/types/provider.ts
+@@ -41,6 +41,7 @@ export interface GeminiKeyConfig {
+ }
+
+ export interface ProviderKeyConfig {
++  signingSecret?: string;
+   apiKey: string;
+   priority?: number;
+   weight?: number;
+@@ -58,6 +59,7 @@ export interface ProviderKeyConfig {
+ }
+
+ export interface OpenAIProviderConfig {
++  signingSecret?: string;
+   name: string;
+   prefix?: string;
+   baseUrl: string;
+diff --git a/tests/monkeycode.test.ts b/tests/monkeycode.test.ts
+new file mode 100644
+index 0000000..ad7d757
+--- /dev/null
++++ b/tests/monkeycode.test.ts
+@@ -0,0 +1,117 @@
++import { afterEach, describe, it } from 'node:test';
++import assert from 'node:assert/strict';
++import { apiClient } from '../src/services/api/client';
++import { apiCallApi } from '../src/services/api/apiCall';
++import { providersApi } from '../src/services/api/providers';
++import {
++  normalizeOpenAIProvider,
++  normalizeProviderKeyConfig,
++} from '../src/services/api/transformers';
++import { monkeyCodeProbe, monkeyCodeCredentialsValid } from '../src/features/providers/monkeycode';
++
++const original = { get: apiClient.get, put: apiClient.put, post: apiClient.post };
++afterEach(() => Object.assign(apiClient, original));
++
++describe('MonkeyCode provider settings', () => {
++  for (const section of ['codex-api-key', 'claude-api-key', 'openai-compatibility']) {
++    it(`round-trips and explicitly clears ${section} without changing other records`, async () => {
++      const raw =
++        section === 'openai-compatibility'
++          ? {
++              name: 'test',
++              'base-url': 'https://example.test/v1',
++              'api-key-entries': [{ 'api-key': 'paired-key' }],
++              signing_secret: 'omas_完整 raw',
++              future: 'keep',
++            }
++          : {
++              'api-key': 'paired-key',
++              'base-url': 'https://example.test/v1',
++              signing_secret: 'omas_完整 raw',
++              future: 'keep',
++            };
++      let rows: unknown[] = [raw, { ...raw, 'api-key': 'other', name: 'other' }];
++      const other = rows[1];
++      apiClient.get = (async () => ({ [section]: rows })) as typeof apiClient.get;
++      apiClient.put = (async (_path: string, body: unknown) => {
++        rows = body as unknown[];
++      }) as typeof apiClient.put;
++      for (const secret of ['omas_完整 raw', 'omas_rotated', '']) {
++        if (section === 'openai-compatibility') {
++          const config = normalizeOpenAIProvider(rows[0])!;
++          assert.equal(config.signingSecret, (rows[0] as typeof raw).signing_secret);
++          await providersApi.updateOpenAIProvider('test', 0, { ...config, signingSecret: secret });
++        } else {
++          const config = normalizeProviderKeyConfig(rows[0])!;
++          assert.equal(config.signingSecret, (rows[0] as typeof raw).signing_secret);
++          const save =
++            section === 'codex-api-key'
++              ? providersApi.updateCodexConfig
++              : providersApi.updateClaudeConfig;
++          await save(config.apiKey, config.baseUrl, { ...config, signingSecret: secret });
++        }
++        assert.equal((rows[0] as typeof raw).signing_secret, secret);
++        assert.equal((rows[0] as typeof raw).future, 'keep');
++        assert.deepEqual(rows[1], other);
++      }
++    });
++  }
++  it('requires one key and explicit base URL only when signing is enabled', () => {
++    assert.equal(monkeyCodeCredentialsValid('omas_test', 'https://test', ['a']), true);
++    assert.equal(monkeyCodeCredentialsValid('omas_test', 'https://test', ['a', 'b']), false);
++    assert.equal(monkeyCodeCredentialsValid('omas_test', '', ['a']), false);
++    assert.equal(monkeyCodeCredentialsValid('  ', 'https://test', ['a']), false);
++    assert.equal(monkeyCodeCredentialsValid('', '', []), true);
++  });
++});
++
++describe('MonkeyCode current draft model tests', () => {
++  for (const brand of ['openaiCompatibility', 'codex', 'claude'] as const) {
++    it(`${brand}: sends the raw draft secret, valid prompt and SSE body; clear overrides saved secret`, async () => {
++      const payloads: Record<string, unknown>[] = [];
++      apiClient.post = (async (_path: string, body: unknown) => {
++        payloads.push(body as Record<string, unknown>);
++        return { status_code: 200, body: 'data: [DONE]\n\n' };
++      }) as typeof apiClient.post;
++      const body = {
++        model: 'test',
++        messages: [{ role: 'user', content: 'hi' }],
++        input: 'hi',
++        stream: false,
++      };
++      for (const secret of ['omas_draft raw', '']) {
++        const probe = monkeyCodeProbe(brand, secret, body);
++        await apiCallApi.request({
++          authIndex: 'saved-auth',
++          method: 'POST',
++          url: 'https://test/v1/test',
++          ...probe,
++        });
++        const call = payloads.at(-1)!;
++        assert.equal(call.signing_secret, secret);
++        assert.equal(call.signingSecret, undefined);
++        const data = JSON.parse(call.data as string);
++        if (secret) {
++          assert.equal(data.stream, true);
++          if (brand === 'claude') assert.equal(data.system, 'You are a helpful assistant.');
++          else if (brand === 'codex') {
++            assert.equal(data.instructions, 'You are a helpful assistant.');
++            assert.ok(Array.isArray(data.input));
++          } else
++            assert.deepEqual(data.messages[0], {
++              role: 'system',
++              content: 'You are a helpful assistant.',
++            });
++        } else assert.deepEqual(data, body);
++      }
++    });
++  }
++  it('preserves omitted draft settings and unsupported providers', () => {
++    assert.deepEqual(monkeyCodeProbe('codex', undefined, { test: true }), {
++      data: '{"test":true}',
++    });
++    assert.deepEqual(monkeyCodeProbe('gemini', undefined, { test: true }), {
++      data: '{"test":true}',
++    });
++  });
++});
+diff --git a/src/pages/SystemPage.tsx b/src/pages/SystemPage.tsx
+index 638184e..0bc8876 100644
+--- a/src/pages/SystemPage.tsx
++++ b/src/pages/SystemPage.tsx
+@@ -349,7 +349,7 @@ export function SystemPage() {
+           <p className={styles.sectionDescription}>{t('system_info.quick_links_desc')}</p>
+           <div className={styles.quickLinks}>
+             <a
+-              href="https://github.com/router-for-me/CLIProxyAPI"
++              href="https://github.com/yinsel/CLIProxyAPI"
+               target="_blank"
+               rel="noopener noreferrer"
+               className={styles.linkCard}

@@ -2,6 +2,30 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
+## MonkeyCode 原生签名（本分支）
+
+独立启动本分支的 CPA 引擎后，打开 `/management.html` 并登录，进入 **API 接入**，
+添加或编辑 OpenAI 兼容、Codex 或 Claude 接入，展开 **高级设置**，填写
+**MonkeyCode 支持**。与桌面端一致：输入与 API Key 配套的完整
+`omas_...`（包含前缀，不做 Base64 解码），留空保存关闭签名。启用签名需要明确的
+Base URL 和一个 API Key；不同配对请拆成多个接入。此字段不是 WebUI 登录管理密钥。
+
+模型测试使用当前表单中的 API Key 和 secret，包括尚未保存的修改；清空后测试立即关闭签名。
+测试会自动添加系统提示词，通过 HTTP/SSE 发出签名请求，不会修改已保存配置。
+模型列表的 GET 请求没有系统提示词，不添加提示词签名。
+
+正常调用在协议转换、伪装和请求体处理完成后，使用原始完整 secret 计算 HMAC-SHA256，
+发送 `X-OhMyAgent-Signature: v1=<hex>`。启用后移除全部上游 URL 查询参数，并关闭
+Codex WebSocket；未设置 secret 时保持原行为。配置支持热更新。
+
+管理页已随引擎内置，不会被官方管理页自动更新覆盖，也不需要桌面端转发。
+手动指定 `MANAGEMENT_STATIC_PATH` 或第三方 `panel-github-repository` 时仍使用自定义管理页，
+该页面需要自行支持这些字段。前端来源及重建方法见 [webui/README.md](webui/README.md)。
+
+也可以在 `openai-compatibility`、`codex-api-key`、`claude-api-key` 记录中设置 `signing_secret`。
+迁移桌面端配置请填写真实上游 Base URL，不要复制 `/monkeycode/` 临时转发地址。
+
+
 如果您想在您的桌面使用 CLIProxyAPI，我们推荐您使用我们的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。
 
 CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。

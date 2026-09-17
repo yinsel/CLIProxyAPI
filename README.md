@@ -2,6 +2,28 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+## Native MonkeyCode signing (this branch)
+
+Run this build independently, open `/management.html`, sign in, and add or edit an OpenAI-compatible,
+Codex or Claude provider. Under **Advanced settings**, enter **MonkeyCode 支持**:
+the complete paired `omas_...` value, including its prefix, without Base64 decoding. Leave it empty
+to disable signing. Signing requires an explicit Base URL and exactly one paired API key.
+This is separate from the WebUI login key.
+
+Model tests use the current form values, including unsaved secrets or an explicit empty value.
+They add a system prompt and sign the final HTTP/SSE request without persisting draft changes.
+GET model discovery does not receive a prompt signature. Normal requests use HMAC-SHA256 after
+protocol conversion; all upstream URL query parameters are removed while signing is enabled,
+and Codex uses HTTP/SSE instead of WebSockets. Configuration changes are hot-reloaded.
+
+The native editor is embedded in the engine so upstream panel updates cannot remove these fields.
+Explicit `MANAGEMENT_STATIC_PATH` or third-party panel repositories remain supported and must
+provide their own settings UI. See [webui/README.md](webui/README.md) for sources and rebuild steps.
+The same `signing_secret` field can be set in `openai-compatibility`, `codex-api-key` and
+`claude-api-key` records. When migrating desktop configuration, use the real upstream Base URL,
+not a temporary localhost `/monkeycode/` address.
+
+
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.

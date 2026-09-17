@@ -179,6 +179,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
+		if ck.SigningSecret != "" {
+			attrs["signing_secret"] = ck.SigningSecret
+		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -252,7 +255,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		if baseURL != "" {
 			attrs["base_url"] = baseURL
 		}
-		if entry.Websockets {
+		if entry.Websockets && (provider != "codex" || entry.SigningSecret == "") {
 			attrs["websockets"] = "true"
 		}
 		if provider == "codex" && entry.AlphaSearch {
@@ -260,6 +263,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		}
 		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
+		}
+		if provider == "codex" && entry.SigningSecret != "" {
+			attrs["signing_secret"] = entry.SigningSecret
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
@@ -335,6 +341,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
+			if compat.SigningSecret != "" {
+				attrs["signing_secret"] = compat.SigningSecret
+			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
@@ -376,6 +385,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
+			}
+			if compat.SigningSecret != "" {
+				attrs["signing_secret"] = compat.SigningSecret
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
