@@ -1,10 +1,17 @@
 name: release
 
 on:
-  push:
-    # run only against tags
-    tags:
-      - '*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to build or retry (for example v7.3.5)'
+        required: true
+        default: 'v7.3.5'
+        type: string
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -12,15 +19,34 @@ permissions:
 env:
   GH_REPO: ${{ github.repository }}
   GO_VERSION: '1.26.4'
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Resolve release source
+        id: source
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Use a version tag such as v7.3.5"
+            exit 1
+          fi
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            source_sha="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          else
+            echo "::error::Tag $RELEASE_TAG does not exist; select an existing release tag"
+            exit 1
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "Building $RELEASE_TAG from $source_sha"
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,26 +73,28 @@ jobs:
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
 
-          git fetch --force --tags
+          git fetch --tags
           previous_tag=""
-          if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
+          if previous_tag_value="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
-            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
+            changelog_range="${previous_tag}..${RELEASE_TAG}"
           else
-            changelog_range="$GITHUB_REF_NAME"
+            changelog_range="$RELEASE_TAG"
           fi
 
-          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
+          git log -n 100 --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
             grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
 
-          gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" \
-            --jq .body > "$generated_notes_file"
+          if ! gh api "repos/${GH_REPO}/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" \
+            --jq .body > "$generated_notes_file"; then
+            : > "$generated_notes_file"
+          fi
           if [[ ! -s "$generated_notes_file" ]]; then
             if [[ -n "$previous_tag" ]]; then
-              printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
+              printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$RELEASE_TAG" > "$generated_notes_file"
             else
-              printf '**Full Changelog**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$GITHUB_REF_NAME" > "$generated_notes_file"
+              printf '**Full Changelog**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$RELEASE_TAG" > "$generated_notes_file"
             fi
           fi
 
@@ -85,10 +113,24 @@ jobs:
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+          # First releases in forks can include the entire upstream history.
+          # Bound the final payload below GitHub's release body limit.
+          python3 - "$updated_notes_file" <<'PYNOTES'
+          import os
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          body = path.read_bytes()
+          if len(body) > 100000:
+              link = f"https://github.com/{os.environ['GH_REPO']}/commits/{os.environ['RELEASE_TAG']}"
+              prefix = body[:90000].decode("utf-8", errors="ignore").rsplit("\n", 1)[0]
+              path.write_text(prefix + f"\n\nRelease notes truncated. [Full commit history]({link}).\n", encoding="utf-8")
+          PYNOTES
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$updated_notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-file "$updated_notes_file"
           fi
 
   build-hosted:
@@ -126,6 +168,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -136,7 +179,7 @@ jobs:
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Fetch tags
         shell: bash
-        run: git fetch --force --tags
+        run: git fetch --tags
       - uses: actions/cache@v4
         with:
           path: |
@@ -150,7 +193,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -201,7 +244,7 @@ jobs:
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
       - name: Refresh release checksums
         continue-on-error: true
         shell: bash
@@ -211,7 +254,7 @@ jobs:
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RELEASE_TAG" \
             --pattern 'CLIProxyAPI_*.tar.gz' \
             --pattern 'CLIProxyAPI_*.zip' \
             --dir "$tmp_dir" \
@@ -230,7 +273,7 @@ jobs:
               shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
             fi
           )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "$tmp_dir/checksums.txt" --clobber
 
   build-linux-glibc:
     name: build linux-${{ matrix.goarch }} glibc
@@ -253,6 +296,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -263,12 +307,12 @@ jobs:
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Fetch tags
         shell: bash
-        run: git fetch --force --tags
+        run: git fetch --tags
       - name: Generate Build Metadata
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -337,7 +381,7 @@ jobs:
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
       - name: Refresh release checksums
         continue-on-error: true
         shell: bash
@@ -347,7 +391,7 @@ jobs:
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RELEASE_TAG" \
             --pattern 'CLIProxyAPI_*.tar.gz' \
             --pattern 'CLIProxyAPI_*.zip' \
             --dir "$tmp_dir" \
@@ -366,7 +410,7 @@ jobs:
               shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
             fi
           )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "$tmp_dir/checksums.txt" --clobber
 
   build-linux-no-plugin:
     name: build linux-${{ matrix.goarch }} no-plugin
@@ -385,6 +429,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -395,7 +440,7 @@ jobs:
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Fetch tags
         shell: bash
-        run: git fetch --force --tags
+        run: git fetch --tags
       - uses: actions/cache@v4
         with:
           path: |
@@ -409,7 +454,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -456,7 +501,7 @@ jobs:
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
       - name: Refresh release checksums
         continue-on-error: true
         shell: bash
@@ -466,7 +511,7 @@ jobs:
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RELEASE_TAG" \
             --pattern 'CLIProxyAPI_*.tar.gz' \
             --pattern 'CLIProxyAPI_*.zip' \
             --dir "$tmp_dir" \
@@ -485,7 +530,7 @@ jobs:
               shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
             fi
           )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "$tmp_dir/checksums.txt" --clobber
 
   build-freebsd:
     name: build ${{ matrix.target }}
@@ -513,6 +558,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -521,7 +567,7 @@ jobs:
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Fetch tags
-        run: git fetch --force --tags
+        run: git fetch --tags
       - uses: actions/cache@v4
         with:
           path: |
@@ -535,7 +581,7 @@ jobs:
         id: metadata
         run: |
           set -euo pipefail
-          release_version="${GITHUB_REF_NAME#v}"
+          release_version="${RELEASE_TAG#v}"
           commit="$(git rev-parse --short HEAD)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
@@ -610,7 +656,7 @@ jobs:
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
       - name: Refresh release checksums
         continue-on-error: true
         shell: bash
@@ -620,7 +666,7 @@ jobs:
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RELEASE_TAG" \
             --pattern 'CLIProxyAPI_*.tar.gz' \
             --pattern 'CLIProxyAPI_*.zip' \
             --dir "$tmp_dir" \
@@ -639,12 +685,13 @@ jobs:
               shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
             fi
           )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "$tmp_dir/checksums.txt" --clobber
 
   publish-checksums:
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && needs.prepare-release.result == 'success' }}
     needs:
+      - prepare-release
       - build-hosted
       - build-linux-glibc
       - build-linux-no-plugin
@@ -659,6 +706,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          if [[ ! -d dist ]]; then
+            echo "No release archives were produced"
+            exit 0
+          fi
           cd dist
           shopt -s nullglob
           archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
@@ -667,4 +718,4 @@ jobs:
             exit 0
           fi
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
+          gh release upload "$RELEASE_TAG" checksums.txt --clobber
