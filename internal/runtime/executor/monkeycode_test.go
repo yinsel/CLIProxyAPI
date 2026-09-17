@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -12,7 +14,108 @@ import (
 	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	executor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
+
+func TestMonkeyCodeCodexExecutorReplaysThinkingOnSecondTurn(t *testing.T) {
+	// Include both full reasoning and a distinct summary: rebuilding reasoning
+	// from the summary would silently discard the original model output.
+	const reasoning = `{"type":"reasoning","id":"rs_thinking","content":[{"type":"reasoning_text","text":"Exact first reasoning block.\n"},{"type":"reasoning_text","text":"Exact second reasoning block."}],"summary":[{"type":"summary_text","text":"A shorter summary."}],"encrypted_content":"opaque-third-party-state"}`
+	const output = `[` + reasoning + `,{"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{}"}]`
+	const event = `{"type":"response.completed","response":{"id":"resp_thinking","object":"response","status":"completed","output":` + output + `}}`
+	for _, bridge := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(map[bool]string{false: "native", true: "desktop-bridge"}[bridge]+map[bool]string{false: "/json", true: "/stream"}[stream], func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					if !bridge {
+						signed, err := helps.MonkeyCodeSignature(body, "omas_test")
+						if err != nil || signed != r.Header.Get("X-OhMyAgent-Signature") {
+							t.Error("invalid signature")
+						}
+					}
+					if calls == 2 {
+						found := false
+						for _, item := range gjson.GetBytes(body, "input").Array() {
+							if item.Get("type").String() != "reasoning" {
+								continue
+							}
+							found = true
+							for _, field := range []string{"content", "summary", "encrypted_content"} {
+								if item.Get(field).Raw != gjson.Get(reasoning, field).Raw {
+									http.Error(w, "The reasoning_text in the thinking mode must be passed back to the API", http.StatusBadRequest)
+									return
+								}
+							}
+						}
+						if !found {
+							http.Error(w, "missing reasoning history", http.StatusBadRequest)
+							return
+						}
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: "+event+"\n\n")
+				}))
+				defer server.Close()
+				credential := &auth.Auth{ID: "thinking-replay", Provider: "codex", Attributes: map[string]string{"api_key": "test", "base_url": server.URL, "signing_secret": "omas_test"}}
+				if bridge {
+					delete(credential.Attributes, "signing_secret")
+					credential.Attributes["base_url"] = server.URL + "/monkeycode/test/v1"
+					credential.Attributes["header:X-EasyCLI-MonkeyCode"] = "test-configured-metadata"
+				}
+				engine := NewCodexExecutor(&config.Config{})
+				input := []json.RawMessage{json.RawMessage(`{"role":"user","content":"Look up the result."}`)}
+				for turn := 0; turn < 2; turn++ {
+					body, _ := json.Marshal(map[string]any{"model": "mk-deepseek-flash", "instructions": "You are a helpful assistant.", "input": input})
+					opts := executor.Options{SourceFormat: translator.FromString("openai-response"), Stream: stream}
+					req := executor.Request{Model: "mk-deepseek-flash", Payload: body}
+					var response []byte
+					if stream {
+						result, err := engine.ExecuteStream(context.Background(), credential, req, opts)
+						if err != nil {
+							t.Fatalf("turn %d: %v", turn+1, err)
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("turn %d: %v", turn+1, chunk.Err)
+							}
+							for _, line := range strings.Split(string(chunk.Payload), "\n") {
+								data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+								if gjson.Get(data, "type").String() == "response.completed" {
+									response = []byte(gjson.Get(data, "response").Raw)
+								}
+							}
+						}
+					} else {
+						result, err := engine.Execute(context.Background(), credential, req, opts)
+						if err != nil {
+							t.Fatalf("turn %d: %v", turn+1, err)
+						}
+						response = result.Payload
+					}
+					if turn == 0 {
+						items := gjson.GetBytes(response, "output").Array()
+						if len(items) != 2 {
+							t.Fatalf("unexpected output: %s", response)
+						}
+						for _, item := range items {
+							input = append(input, json.RawMessage(item.Raw))
+						}
+						input = append(input, json.RawMessage(`{"type":"function_call_output","call_id":"call_lookup","output":"found"}`))
+					}
+				}
+				if calls != 2 {
+					t.Fatalf("upstream calls = %d", calls)
+				}
+			})
+		}
+	}
+}
 
 func TestMonkeyCodeExecutorsSignFinalTranslatedRequests(t *testing.T) {
 	for _, protocol := range []string{"claude", "codex", "openai"} {

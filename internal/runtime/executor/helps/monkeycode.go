@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -17,6 +19,31 @@ import (
 )
 
 const monkeyCodeSignatureHeader = "X-OhMyAgent-Signature"
+
+// IsMonkeyCodeAuth recognizes native signing and EasyCLI's configured loopback
+// bridge. The latter stores signing metadata in a reserved provider header.
+func IsMonkeyCodeAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes["signing_secret"] != "" {
+		return true
+	}
+	base, err := url.Parse(auth.Attributes["base_url"])
+	if err != nil || base.Scheme != "http" || !strings.HasPrefix(base.Path, "/monkeycode/") {
+		return false
+	}
+	host := base.Hostname()
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return false
+	}
+	for key, value := range auth.Attributes {
+		if strings.EqualFold(key, "header:X-EasyCLI-MonkeyCode") && value != "" {
+			return true
+		}
+	}
+	return false
+}
 
 type monkeyCodeError string
 

@@ -15,6 +15,31 @@ import (
 	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestMonkeyCodeAuthRecognition(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		attrs map[string]string
+		want  bool
+	}{
+		{"native", map[string]string{"signing_secret": "omas_test"}, true},
+		{"bridge", map[string]string{"base_url": "http://127.0.0.1:1234/monkeycode/route/v1", "header:X-EasyCLI-MonkeyCode": "metadata"}, true},
+		{"bridge-ipv6", map[string]string{"base_url": "http://[::1]:1234/monkeycode/route/v1", "header:x-easycli-monkeycode": "metadata"}, true},
+		{"ordinary", map[string]string{}, false},
+		{"remote-marker", map[string]string{"base_url": "https://api.example/monkeycode/route/v1", "header:X-EasyCLI-MonkeyCode": "metadata"}, false},
+		{"unmarked-local", map[string]string{"base_url": "http://127.0.0.1:1234/monkeycode/route/v1"}, false},
+		{"other-path", map[string]string{"base_url": "http://127.0.0.1:1234/v1", "header:X-EasyCLI-MonkeyCode": "metadata"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsMonkeyCodeAuth(&auth.Auth{Attributes: tc.attrs}); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if IsMonkeyCodeAuth(nil) {
+		t.Fatal("nil auth recognized")
+	}
+}
+
 func TestMonkeyCodeResponsesNormalizationPreservesHistory(t *testing.T) {
 	const body = `{"instructions":"Keep the prompt.","input":[{"role":"user","content":"hi"},{"type":"reasoning","id":"rs_1","content":null,"summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"opaque"},{"type":"reasoning","content":[{"type":"reasoning_text","text":"Keep"}]},{"type":"reasoning","summary":[]},{"type":"function_call","call_id":"c1","name":"read_file","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"file","content":null}]}`
 	want := strings.Replace(body, `"content":null`, `"content":[]`, 1)

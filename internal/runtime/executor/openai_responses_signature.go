@@ -8,6 +8,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -46,6 +47,15 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 		return itemRaw, nil
 	}
 	return sjson.SetRaw(itemRaw, "summary", b.String())
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentForAuth(ctx context.Context, provider string, body []byte, auth *cliproxyauth.Auth) []byte {
+	// MonkeyCode can route to third-party thinking models that require the exact
+	// reasoning_text on replay. Their opaque state is not an OpenAI signature.
+	if helps.IsMonkeyCodeAuth(auth) {
+		return body
+	}
+	return sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, provider, body)
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
