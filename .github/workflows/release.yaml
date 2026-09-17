@@ -600,22 +600,32 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang lld wget
+          sudo apt-get install -y clang lld curl xz-utils
       - name: Build FreeBSD binary with CGO
         if: ${{ matrix.cgo_enabled }}
         timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        with:
-          dir: .
-          packages: ./cmd/server/
-          targets: ${{ env.TARGET }}
-          out-dir: dist/${{ env.TARGET }}/bin
-          output: cli-proxy-api
-          flags: >-
-            -ldflags=-s -w
-            -X main.Version=${{ steps.metadata.outputs.release_version }}
-            -X main.Commit=${{ steps.metadata.outputs.commit }}
-            -X main.BuildDate=${{ steps.metadata.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the existing FreeBSD 14.3 ABI baseline using the official archive.
+          # Its base.txz checksum is pinned from the release MANIFEST.
+          sysroot_dir="$(mktemp -d)"
+          trap 'rm -rf "$sysroot_dir"' EXIT
+          curl --fail --location --retry 3 \
+            https://archive.freebsd.org/old-releases/amd64/amd64/14.3-RELEASE/base.txz \
+            --output "$sysroot_dir/base.txz"
+          printf '%s  %s\n' \
+            e38b5cf756d60086a6c2f736eff19cc7685f7e2313e31d14342fc8df57200a92 \
+            "$sysroot_dir/base.txz" | sha256sum --check --strict
+          tar -xJf "$sysroot_dir/base.txz" -C "$sysroot_dir" \
+            --no-same-owner --no-same-permissions ./lib ./usr/lib ./usr/include
+          mkdir -p "dist/${TARGET}/bin"
+          CGO_ENABLED=1 GOOS=freebsd GOARCH="$TARGET_GOARCH" \
+            CC="clang --target=x86_64-unknown-freebsd14.3 --sysroot=$sysroot_dir" \
+            CGO_LDFLAGS="-fuse-ld=lld" \
+            go build -buildvcs=false \
+              -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+              -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Build FreeBSD no-plugin binary
         if: ${{ !matrix.cgo_enabled }}
         shell: bash
