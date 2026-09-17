@@ -23,11 +23,17 @@ func TestMonkeyCodeManagementHTML(t *testing.T) {
 	engine.GET("/management.html", server.serveManagementControlPanel)
 	response := httptest.NewRecorder()
 	engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/management.html", nil))
-	if response.Code != 200 || !strings.Contains(response.Body.String(), "data-cpa-monkeycode") || !strings.Contains(response.Body.String(), "upstream panel") {
-		t.Fatal("management panel not augmented")
+	if response.Code != 200 || !strings.Contains(response.Body.String(), "upstream panel") {
+		t.Fatal("custom management panel not preserved")
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("management panel may be stale")
+	}
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+	response = httptest.NewRecorder()
+	engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/management.html", nil))
+	if response.Code != 200 || !strings.Contains(response.Body.String(), "signing_secret") || strings.Contains(response.Body.String(), "upstream panel") {
+		t.Fatal("bundled native editor not served")
 	}
 	server.cfg.RemoteManagement.DisableControlPanel = true
 	response = httptest.NewRecorder()

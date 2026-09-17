@@ -313,6 +313,16 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	if managementasset.UseBundledManagementPanel(cfg.RemoteManagement.PanelGitHubRepository) {
+		body, err := managementasset.BundledManagementHTML()
+		if err != nil {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", body)
+		return
+	}
 	filePath := managementasset.FilePath(s.configFilePath)
 	if strings.TrimSpace(filePath) == "" {
 		c.AbortWithStatus(http.StatusNotFound)
@@ -340,5 +350,5 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 	c.Header("Cache-Control", "no-store")
-	c.Data(http.StatusOK, "text/html; charset=utf-8", managementasset.WithMonkeyCodePanel(body))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", body)
 }

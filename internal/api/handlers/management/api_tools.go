@@ -38,6 +38,7 @@ type apiCallRequest struct {
 	ProxyURL        string            `json:"proxy_url"`
 	Header          map[string]string `json:"header"`
 	Data            string            `json:"data"`
+	SigningSecret   *string           `json:"signing_secret"`
 }
 
 type apiCallResponse struct {
@@ -76,6 +77,11 @@ type apiCallResponse struct {
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
 //     Note: if you need to override the HTTP Host header, set header["Host"].
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
+//   - signing_secret (optional): Draft MonkeyCode secret for a provider test. Omit to
+//     use the selected credential's saved secret; an empty string disables signing.
+//     This value is only used for this request and is never persisted.
+//     Draft tests are limited to HTTP(S) POST chat/completions, responses and
+//     messages endpoints, without URL credentials or a Host override.
 //
 // Proxy selection (highest priority first):
 //  1. Request proxy_url (when set, lower-priority proxy settings are ignored)
@@ -121,6 +127,21 @@ func (h *Handler) APICall(c *gin.Context) {
 	if errParseURL != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
 		return
+	}
+	if body.SigningSecret != nil {
+		validPath := strings.HasSuffix(parsedURL.Path, "/chat/completions") ||
+			strings.HasSuffix(parsedURL.Path, "/responses") || strings.HasSuffix(parsedURL.Path, "/messages")
+		if method != http.MethodPost || !validPath || parsedURL.User != nil ||
+			(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "draft signing is limited to HTTP(S) model tests"})
+			return
+		}
+		for name, value := range body.Header {
+			if strings.EqualFold(name, "Host") && strings.TrimSpace(value) != "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "draft signing does not allow a Host override"})
+				return
+			}
+		}
 	}
 
 	requestProxyURL := strings.TrimSpace(body.ProxyURL)
@@ -213,7 +234,34 @@ func (h *Handler) APICall(c *gin.Context) {
 		Timeout: defaultAPICallTimeout,
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
-	helps.ConfigureMonkeyCodeClient(httpClient, auth)
+	signingAuth := auth
+	if body.SigningSecret != nil {
+		secret := *body.SigningSecret
+		if len(secret) > 4096 || (secret != "" && strings.TrimSpace(secret) == "") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid signing_secret"})
+			return
+		}
+		// Use the key from the draft request after token substitution. Never mutate
+		// the saved auth, and never sign a new key with the saved key's secret.
+		key := req.Header.Get("X-Api-Key")
+		if !strings.HasSuffix(req.URL.Path, "/messages") || key == "" {
+			if bearer := req.Header.Get("Authorization"); len(bearer) > 7 && strings.EqualFold(bearer[:7], "Bearer ") {
+				key = strings.TrimSpace(bearer[7:])
+			}
+		}
+		if secret != "" && (key == "" || strings.Contains(key, "$TOKEN$")) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "MonkeyCode signing requires the paired API key"})
+			return
+		}
+		if secret != "" {
+			if _, err := helps.MonkeyCodeSignature([]byte(body.Data), secret); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "MonkeyCode model tests require a valid system prompt"})
+				return
+			}
+		}
+		signingAuth = &coreauth.Auth{Attributes: map[string]string{"signing_secret": secret, "api_key": key}}
+	}
+	helps.ConfigureMonkeyCodeClient(httpClient, signingAuth)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {

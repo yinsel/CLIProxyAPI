@@ -86,6 +86,9 @@ func runAutoUpdater(ctx context.Context) {
 			log.Debugf("management asset auto-updater skipped: %s", reason)
 			return
 		}
+		if UseBundledManagementPanel(cfg.RemoteManagement.PanelGitHubRepository) {
+			return
+		}
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)

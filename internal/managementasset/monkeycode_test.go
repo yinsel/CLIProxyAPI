@@ -2,20 +2,37 @@ package managementasset
 
 import (
 	"bytes"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"testing"
 )
 
-func TestMonkeyCodePanelSurvivesAssetUpdates(t *testing.T) {
-	for _, page := range []string{"<!doctype html><html><head><script>original()</script></head><body>hello</body></html>", "<HTML><HEAD lang='en'></HEAD><BODY>new release</BODY></HTML>", "<body>fallback</body>"} {
-		got := WithMonkeyCodePanel([]byte(page))
-		if !bytes.Contains(got, []byte("data-cpa-monkeycode")) || !bytes.Contains(got, []byte("signing_secret")) {
-			t.Fatal("missing settings panel")
+func TestMonkeyCodeBundledNativePanel(t *testing.T) {
+	page, err := BundledManagementHTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"signing_secret", "monkeycode", "<html", "omas_"} {
+		if !bytes.Contains(page, []byte(marker)) {
+			t.Fatalf("native editor missing %s", marker)
 		}
-		if p := bytes.Index(got, []byte("original()")); p >= 0 && bytes.Index(got, []byte("data-cpa-monkeycode")) > p {
-			t.Fatal("authentication observer loaded too late")
+	}
+	if bytes.Contains(page, []byte("cpa-monkeycode-settings")) {
+		t.Fatal("legacy floating panel remains")
+	}
+}
+
+func TestMonkeyCodeBundledPanelSelection(t *testing.T) {
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+	for _, repo := range []string{"", config.DefaultPanelGitHubRepository} {
+		if !UseBundledManagementPanel(repo) {
+			t.Fatal("default editor not bundled")
 		}
-		if bytes.Contains(monkeyCodePanel, []byte("</script")) {
-			t.Fatal("embedded script closes its own tag")
-		}
+	}
+	if UseBundledManagementPanel("https://github.com/example/custom") {
+		t.Fatal("custom repository overridden")
+	}
+	t.Setenv("MANAGEMENT_STATIC_PATH", t.TempDir())
+	if UseBundledManagementPanel("") {
+		t.Fatal("custom static path overridden")
 	}
 }
