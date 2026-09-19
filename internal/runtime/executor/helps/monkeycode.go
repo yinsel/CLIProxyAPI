@@ -121,9 +121,9 @@ func monkeyCodePromptText(raw json.RawMessage, firstOnly bool) string {
 	return strings.Join(texts, "\n")
 }
 
-// prepareMonkeyCodeBody normalizes only explicit null reasoning content in
-// Responses history. Preserve reasoning summaries, encrypted content, tool
-// calls, and omitted content; strict upstreams require an array when present.
+// prepareMonkeyCodeBody adapts Responses history for strict upstream schemas.
+// Preserve reasoning and search history; only normalize null reasoning content
+// and supply the plural search queries field from an existing singular query.
 func prepareMonkeyCodeBody(path string, body []byte) ([]byte, error) {
 	if !strings.HasSuffix(path, "/responses") && !strings.HasSuffix(path, "/responses/compact") {
 		return body, nil
@@ -136,14 +136,26 @@ func prepareMonkeyCodeBody(path string, body []byte) ([]byte, error) {
 		return body, nil
 	}
 	for i, item := range input.Array() {
-		content := item.Get("content")
-		if item.Get("type").String() != "reasoning" || content.Type != gjson.Null || !content.Exists() {
-			continue
-		}
 		var errSet error
-		body, errSet = sjson.SetRawBytes(body, fmt.Sprintf("input.%d.content", i), []byte("[]"))
+		switch item.Get("type").String() {
+		case "reasoning":
+			content := item.Get("content")
+			if content.Type != gjson.Null || !content.Exists() {
+				continue
+			}
+			body, errSet = sjson.SetRawBytes(body, fmt.Sprintf("input.%d.content", i), []byte("[]"))
+		case "web_search_call":
+			// Codex permits action.query without action.queries. Retain the
+			// original query, and never replace an existing non-null value.
+			action := item.Get("action")
+			query := action.Get("query")
+			if action.Get("type").String() != "search" || query.Type != gjson.String || action.Get("queries").Type != gjson.Null {
+				continue
+			}
+			body, errSet = sjson.SetBytes(body, fmt.Sprintf("input.%d.action.queries", i), []string{query.String()})
+		}
 		if errSet != nil {
-			return nil, fmt.Errorf("normalize MonkeyCode reasoning content: %w", errSet)
+			return nil, fmt.Errorf("normalize MonkeyCode Responses history: %w", errSet)
 		}
 	}
 	return body, nil

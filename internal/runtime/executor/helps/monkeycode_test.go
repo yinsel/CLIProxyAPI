@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -81,12 +83,62 @@ func TestMonkeyCodeResponsesNormalizationPreservesHistory(t *testing.T) {
 	}
 }
 
+func TestMonkeyCodeSearchHistory(t *testing.T) {
+	data, err := os.ReadFile("testdata/monkeycode-search-history.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name     string
+		Item     json.RawMessage
+		Expected json.RawMessage
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			body := []byte(`{"instructions":"Preserve this prompt","input":[` + string(tc.Item) + `]}`)
+			want := []byte(`{"instructions":"Preserve this prompt","input":[` + string(tc.Expected) + `]}`)
+			for _, path := range []string{"/v1/responses", "/v1/responses/compact", "/v1/messages", "/v1/chat/completions"} {
+				got, err := prepareMonkeyCodeBody(path, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := want
+				if path == "/v1/messages" || path == "/v1/chat/completions" {
+					expected = body
+				}
+				var actualJSON, expectedJSON any
+				if err := json.Unmarshal(got, &actualJSON); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(expected, &expectedJSON); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(actualJSON, expectedJSON) {
+					t.Fatalf("%s: got %s; want %s", path, got, expected)
+				}
+				second, err := prepareMonkeyCodeBody(path, got)
+				if err != nil || !bytes.Equal(second, got) {
+					t.Fatal("normalization not idempotent")
+				}
+				before, _ := MonkeyCodeSignature(body, "omas_test")
+				after, _ := MonkeyCodeSignature(got, "omas_test")
+				if before != after {
+					t.Fatal("prompt signature changed")
+				}
+			}
+		})
+	}
+}
+
 func TestMonkeyCodeCodexSecondTurn(t *testing.T) {
 	for name, makeClient := range map[string]func(context.Context, *config.Config, *auth.Auth, time.Duration) *http.Client{
 		"openai": NewProxyAwareHTTPClient, "claude-codex": NewUtlsHTTPClient,
 	} {
 		t.Run(name, func(t *testing.T) {
-			const output = `[{"type":"reasoning","id":"rs_1","content":null,"summary":[],"encrypted_content":"opaque"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]`
+			const output = `[{"type":"reasoning","id":"rs_1","content":null,"summary":[],"encrypted_content":"opaque"},{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]`
 			const event = `{"type":"response.completed","response":{"output":` + output + `}}`
 			const sse = "data: " + event + "\n\n"
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,12 +158,20 @@ func TestMonkeyCodeCodexSecondTurn(t *testing.T) {
 						Type      string          `json:"type"`
 						Content   json.RawMessage `json:"content"`
 						Encrypted string          `json:"encrypted_content"`
+						Action    struct {
+							Query   string   `json:"query"`
+							Queries []string `json:"queries"`
+						} `json:"action"`
 					} `json:"input"`
 				}
 				if err := json.Unmarshal(body, &payload); err != nil {
 					t.Error(err)
 				}
 				for _, item := range payload.Input {
+					if item.Type == "web_search_call" && !reflect.DeepEqual(item.Action.Queries, []string{item.Action.Query}) {
+						http.Error(w, "input: missing field `queries`", http.StatusUnprocessableEntity)
+						return
+					}
 					if item.Type == "reasoning" {
 						var content []json.RawMessage
 						if err := json.Unmarshal(item.Content, &content); err != nil || content == nil {
