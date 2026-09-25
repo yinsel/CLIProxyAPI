@@ -191,6 +191,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		Priority            *int                             `json:"priority"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -249,6 +250,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -393,6 +397,7 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		Priority            *int                             `json:"priority"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -452,6 +457,9 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	entry := h.cfg.InteractionsKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -560,6 +568,29 @@ func (h *Handler) DeleteInteractionsKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+func (h *Handler) findExistingClaudeKey(existing []config.ClaudeKey, item config.ClaudeKey) *config.ClaudeKey {
+	apiKey := strings.TrimSpace(item.APIKey)
+	baseURL := strings.TrimSpace(item.BaseURL)
+	prefix := strings.TrimSpace(item.Prefix)
+	proxyURL := strings.TrimSpace(item.ProxyURL)
+
+	// Match strictly by exact identity tuple (apiKey, baseURL, prefix, proxyURL)
+	var matches []*config.ClaudeKey
+	for i := range existing {
+		if strings.TrimSpace(existing[i].APIKey) == apiKey &&
+			strings.TrimSpace(existing[i].BaseURL) == baseURL &&
+			strings.TrimSpace(existing[i].Prefix) == prefix &&
+			strings.TrimSpace(existing[i].ProxyURL) == proxyURL {
+			matches = append(matches, &existing[i])
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+
+	return nil
+}
+
 // claude-api-key: []ClaudeKey
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
@@ -581,7 +612,18 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for i := range arr {
+		if arr[i].Cloak == nil {
+			if old := h.findExistingClaudeKey(h.cfg.ClaudeKey, arr[i]); old != nil && old.Cloak != nil && old.Cloak.Mode != "" {
+				arr[i].Cloak = &config.CloakConfig{Mode: old.Cloak.Mode}
+			}
+		} else if strings.TrimSpace(arr[i].Cloak.Mode) == "" {
+			if old := h.findExistingClaudeKey(h.cfg.ClaudeKey, arr[i]); old != nil && old.Cloak != nil && old.Cloak.Mode != "" {
+				arr[i].Cloak.Mode = old.Cloak.Mode
+			}
+		}
 		normalizeClaudeKey(&arr[i])
 		if rejectInvalidCredentialWeight(c, fmt.Sprintf("claude-api-key[%d].weight", i), arr[i].Weight) {
 			return
@@ -590,8 +632,6 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 			return
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	preserveMonkeyCodeSecrets(data, arr, h.cfg.ClaudeKey)
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
@@ -601,6 +641,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		SigningSecret           *string                          `json:"signing_secret"`
 		APIKey                  *string                          `json:"api-key"`
+		Priority                *int                             `json:"priority"`
 		FingerprintProfile      *string                          `json:"fingerprint-profile"`
 		Weight                  json.RawMessage                  `json:"weight"`
 		Prefix                  *string                          `json:"prefix"`
@@ -613,6 +654,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		DisableCooling          json.RawMessage                  `json:"disable-cooling"`
 		RequestRetry            *int                             `json:"request-retry"`
 		RequestScopedErrors     *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
+		Cloak                   json.RawMessage                  `json:"cloak"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -644,12 +686,20 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.ClaudeKey[targetIndex]
+	oldEntry := h.cfg.ClaudeKey[targetIndex]
+	entry := oldEntry
+	identityChanged := (body.Value.APIKey != nil && strings.TrimSpace(*body.Value.APIKey) != oldEntry.APIKey) ||
+		(body.Value.BaseURL != nil && strings.TrimSpace(*body.Value.BaseURL) != oldEntry.BaseURL) ||
+		(body.Value.Prefix != nil && strings.TrimSpace(*body.Value.Prefix) != oldEntry.Prefix) ||
+		(body.Value.ProxyURL != nil && strings.TrimSpace(*body.Value.ProxyURL) != oldEntry.ProxyURL)
 	if body.Value.SigningSecret != nil {
 		entry.SigningSecret = *body.Value.SigningSecret
 	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.FingerprintProfile != nil {
 		if rejectInvalidFingerprintProfile(c, "fingerprint-profile", *body.Value.FingerprintProfile) {
@@ -694,6 +744,57 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if len(body.Value.Cloak) > 0 {
+		trimmed := strings.TrimSpace(string(body.Value.Cloak))
+		if trimmed == "null" {
+			entry.Cloak = nil
+		} else {
+			type cloakPatch struct {
+				Mode           *string   `json:"mode"`
+				StrictMode     *bool     `json:"strict-mode"`
+				SensitiveWords *[]string `json:"sensitive-words"`
+				CacheUserID    *bool     `json:"cache-user-id"`
+			}
+			var p cloakPatch
+			if errCloak := json.Unmarshal(body.Value.Cloak, &p); errCloak != nil {
+				c.JSON(400, gin.H{"error": "invalid cloak config"})
+				return
+			}
+			if entry.Cloak == nil || identityChanged {
+				entry.Cloak = &config.CloakConfig{}
+			} else {
+				copiedCloak := *entry.Cloak
+				if len(entry.Cloak.SensitiveWords) > 0 {
+					copiedCloak.SensitiveWords = append([]string(nil), entry.Cloak.SensitiveWords...)
+				}
+				entry.Cloak = &copiedCloak
+			}
+			if p.Mode != nil {
+				modeVal := strings.TrimSpace(*p.Mode)
+				if modeVal == "" && !identityChanged && oldEntry.Cloak != nil {
+					entry.Cloak.Mode = oldEntry.Cloak.Mode
+				} else {
+					entry.Cloak.Mode = modeVal
+				}
+			} else if identityChanged {
+				entry.Cloak.Mode = ""
+			}
+			if p.StrictMode != nil {
+				entry.Cloak.StrictMode = *p.StrictMode
+			}
+			if p.SensitiveWords != nil {
+				entry.Cloak.SensitiveWords = *p.SensitiveWords
+			}
+			if p.CacheUserID != nil {
+				entry.Cloak.CacheUserID = p.CacheUserID
+			}
+			entry.Cloak = config.NormalizeCloakConfig(entry.Cloak)
+		}
+	} else if identityChanged && entry.Cloak != nil {
+		copiedCloak := *entry.Cloak
+		copiedCloak.Mode = ""
+		entry.Cloak = config.NormalizeCloakConfig(&copiedCloak)
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -800,6 +901,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
 		SigningSecret         *string                             `json:"signing_secret"`
 		Name                  *string                             `json:"name"`
+		Priority              *int                                `json:"priority"`
 		Prefix                *string                             `json:"prefix"`
 		Disabled              *bool                               `json:"disabled"`
 		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
@@ -847,6 +949,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -965,6 +1070,7 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Priority       *int                        `json:"priority"`
 		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
@@ -1017,6 +1123,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 			return
 		}
 		entry.APIKey = trimmed
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1431,19 +1540,21 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		SigningSecret       *string                          `json:"signing_secret"`
-		APIKey              *string                          `json:"api-key"`
-		Weight              json.RawMessage                  `json:"weight"`
-		Prefix              *string                          `json:"prefix"`
-		BaseURL             *string                          `json:"base-url"`
-		ProxyURL            *string                          `json:"proxy-url"`
-		AlphaSearch         *bool                            `json:"alpha-search"`
-		Models              *[]config.CodexModel             `json:"models"`
-		Headers             *map[string]string               `json:"headers"`
-		ExcludedModels      *[]string                        `json:"excluded-models"`
-		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
-		RequestRetry        *int                             `json:"request-retry"`
-		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
+		SigningSecret        *string                          `json:"signing_secret"`
+		APIKey               *string                          `json:"api-key"`
+		Priority             *int                             `json:"priority"`
+		Weight               json.RawMessage                  `json:"weight"`
+		Prefix               *string                          `json:"prefix"`
+		BaseURL              *string                          `json:"base-url"`
+		ProxyURL             *string                          `json:"proxy-url"`
+		AlphaSearch          *bool                            `json:"alpha-search"`
+		Models               *[]config.CodexModel             `json:"models"`
+		Headers              *map[string]string               `json:"headers"`
+		ExcludedModels       *[]string                        `json:"excluded-models"`
+		DisableCooling       json.RawMessage                  `json:"disable-cooling"`
+		DisableCodexCloaking json.RawMessage                  `json:"disable-codex-cloaking"`
+		RequestRetry         *int                             `json:"request-retry"`
+		RequestScopedErrors  *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1482,6 +1593,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
 		if errWeight != nil {
@@ -1519,6 +1633,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if !applyDisableCodexCloakingPatch(c, body.Value.DisableCodexCloaking, &entry.DisableCodexCloaking) {
 		return
 	}
 	if body.Value.RequestRetry != nil {
@@ -1992,6 +2109,23 @@ func applyDisableCoolingPatch(c *gin.Context, raw json.RawMessage, target **bool
 	return true
 }
 
+func applyDisableCodexCloakingPatch(c *gin.Context, raw json.RawMessage, target **bool) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		*target = nil
+		return true
+	}
+	var value bool
+	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+		c.JSON(400, gin.H{"error": "disable-codex-cloaking must be a boolean or null"})
+		return false
+	}
+	*target = &value
+	return true
+}
+
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return
@@ -2042,6 +2176,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Cloak = config.NormalizeCloakConfig(entry.Cloak)
 	if len(entry.Models) == 0 {
 		return
 	}

@@ -6,10 +6,25 @@ import (
 	"strings"
 	"testing"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
 var benchmarkSanitizeOpenAIResponsesReasoningOutput []byte
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentForAuthWithCompat(t *testing.T) {
+	body := []byte(`{"store":false,"input":[{"id":"rs_1","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"thinking"}]}]}`)
+	monkeyCode := &cliproxyauth.Auth{Attributes: map[string]string{"signing_secret": "secret"}}
+	if got := sanitizeOpenAIResponsesReasoningEncryptedContentForAuthWithCompat(context.Background(), "test", body, monkeyCode, false); string(got) != string(body) {
+		t.Fatalf("MonkeyCode reasoning history changed: %s", got)
+	}
+	if got := sanitizeOpenAIResponsesReasoningEncryptedContentForAuthWithCompat(context.Background(), "test", body, nil, true); gjson.GetBytes(got, "input.0.content.0.text").String() != "thinking" || gjson.GetBytes(got, "input.0.id").String() != "rs_1" {
+		t.Fatalf("compat reasoning history changed: %s", got)
+	}
+	if got := sanitizeOpenAIResponsesReasoningEncryptedContentForAuthWithCompat(context.Background(), "test", body, nil, false); len(gjson.GetBytes(got, "input.0.content").Array()) != 0 || gjson.GetBytes(got, "input.0.id").Exists() {
+		t.Fatalf("official Codex reasoning was not sanitized: %s", got)
+	}
+}
 
 func assertEmptyReasoningContent(t *testing.T, body []byte, path string) {
 	t.Helper()
@@ -161,6 +176,36 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_NoopReturnsOriginalBod
 	}
 	if len(got) > 0 && len(body) > 0 && &got[0] != &body[0] {
 		t.Fatalf("noop path should return the original body slice")
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesReasoningContentAndID(t *testing.T) {
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_compat","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"keep cleartext thinking"}],"encrypted_content":null},` +
+		`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}` +
+		`]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(context.Background(), "test", body, true)
+
+	reasoningItem := gjson.GetBytes(got, "input.0")
+	if gotID := reasoningItem.Get("id").String(); gotID != "rs_compat" {
+		t.Fatalf("reasoning id = %q, want rs_compat; body=%s", gotID, got)
+	}
+	content := reasoningItem.Get("content")
+	if !content.Exists() || !content.IsArray() || len(content.Array()) != 1 {
+		t.Fatalf("content should have 1 item, got %s body=%s", content.Raw, got)
+	}
+	if gotType := reasoningItem.Get("content.0.type").String(); gotType != "reasoning_text" {
+		t.Fatalf("content.0.type = %q, want reasoning_text; body=%s", gotType, got)
+	}
+	if gotText := reasoningItem.Get("content.0.text").String(); gotText != "keep cleartext thinking" {
+		t.Fatalf("content.0.text = %q, want keep cleartext thinking; body=%s", gotText, got)
+	}
+	if gotLen := len(reasoningItem.Get("summary").Array()); gotLen != 0 {
+		t.Fatalf("summary should remain empty for compat, got %d items; body=%s", gotLen, got)
+	}
+	if reasoningItem.Get("encrypted_content").Exists() {
+		t.Fatalf("null encrypted_content should still be stripped: %s", got)
 	}
 }
 
